@@ -1,193 +1,179 @@
-import { AndroidActivityResultEventData, AndroidApplication, Application } from "@nativescript/core";
-import { isNullOrUndefined } from "@nativescript/core/utils/types";
-import { Common, IInitializationResult, ILoginResult, LoginResultType, merge, ILoginConfiguration, LOGTAG_LOGOUT } from "./nativescript-google-login.common";
+import { AndroidActivityResultEventData, AndroidApplication, Application } from '@nativescript/core';
+import { GoogleLoginConfig } from './models/google-login-config';
+import { GoogleLoginResult } from './models/google-login-result';
+import { Observable, Subscriber } from 'rxjs';
+import { Common } from './nativescript-google-login.common';
 
-const LOGTAG_ON_ACTIVITY_RESULT = "onActivityResult()";
 
 declare const java;
-
 declare var com: any;
 
-const actionRunnable = (function () {
-    return java.lang.Runnable.extend({
-        action: undefined,
-        run() {
-            this.action();
-        }
-    });
+const actionRunnable = (function() {
+  return java.lang.Runnable.extend({
+    action: undefined,
+    run() {
+      this.action();
+    },
+  });
 })();
 
 export class GoogleLogin extends Common {
-    private static _googleClient: any; // com.google.android.gms.common.api.GoogleApiClient
-    private static _rcGoogleSignIn: number = 597; // < 16 bits
-    private static _handleResult: boolean = false;
+  private googleClient: any; // com.google.android.gms.common.api.GoogleApiClient
+  private mGoogleApiClient: any;
+  private rcGoogleSignIn: number = 597; // < 16 bits
+  private handleResult: boolean = false;
 
-    static init(config: ILoginConfiguration = {}): IInitializationResult {
-        this.Config = merge(this.defaultConfig, config);
-        let result: IInitializationResult = { isInitialized: false };
-        GoogleLogin._handleResult = true; // to avoid calling the call back 2 times
-        console.log("activity: " + GoogleLogin.Config.activity);
+  private readonly gms = com.google.android.gms;
 
-        if (isNullOrUndefined(GoogleLogin.Config.activity)) {
-            GoogleLogin.Config.activity = Application.android.foregroundActivity || Application.android.startActivity;
-        }
+  constructor(config: GoogleLoginConfig, activity: any) {
+    super(config, activity);
+  }
 
-        // Google
-        if (GoogleLogin.Config.google.initialize) {
-            result = GoogleLogin.initGoogle(result);
-        }
+  onLoginResult = (subscriber: Subscriber<GoogleLoginResult>) =>
+    ({ requestCode, resultCode, intent }: AndroidActivityResultEventData) => {
+      if (!this.handleResult) {
+        return;
+      }
+      if (requestCode === this.rcGoogleSignIn) {
+        this.handleResult = false;
 
-        if (!isNullOrUndefined(GoogleLogin.Config.activity)) {
-            const onLoginResult = ({ requestCode, resultCode, intent }: AndroidActivityResultEventData) => {
-                if (!GoogleLogin._handleResult) return;
-
-
-                if (requestCode === GoogleLogin._rcGoogleSignIn) {
-                    const resultCtx: Partial<ILoginResult> = {};
-                    let callback = GoogleLogin._loginCallback;
-                    let activityResultHandled = false;
-                    GoogleLogin._handleResult = false;
-
-                    try {
-                        if (requestCode === GoogleLogin._rcGoogleSignIn) {
-                            resultCtx.provider = "google";
-
-                            activityResultHandled = true;
-
-                            if (resultCode === android.app.Activity.RESULT_OK) {
-                                console.log("OK");
-
-                                const signInResult = com.google.android.gms.auth.api.Auth.GoogleSignInApi.getSignInResultFromIntent(intent);
-                                if (signInResult.isSuccess()) {
-                                    console.log("Success");
-
-                                    resultCtx.code = LoginResultType.Success;
-
-                                    const account = signInResult.getSignInAccount();
-
-                                    const usrId = account.getId();
-                                    if (!isNullOrUndefined(usrId)) {
-                                        resultCtx.id = usrId;
-                                    }
-
-                                    const photoUrl = <android.net.Uri>(account.getPhotoUrl());
-                                    if (!isNullOrUndefined(photoUrl)) {
-                                        resultCtx.photo = photoUrl.toString();
-                                    }
-
-                                    resultCtx.authToken = account.getIdToken();
-                                    resultCtx.authCode = account.getServerAuthCode();
-                                    resultCtx.userToken = account.getEmail();
-                                    resultCtx.displayName = account.getDisplayName();
-                                    resultCtx.firstName = account.getGivenName();
-                                    resultCtx.lastName = account.getFamilyName();
-                                } else {
-                                    console.log("NO SUCCESS!");
-                                    resultCtx.code = LoginResultType.Failed;
-                                }
-                            } else if (resultCode === android.app.Activity.RESULT_CANCELED) {
-                                console.log("Cancelled");
-                                resultCtx.code = LoginResultType.Cancelled;
-                            }
-
-                            GoogleLogin.logResult(resultCtx, LOGTAG_ON_ACTIVITY_RESULT);
-                        }
-                    } catch (e) {
-                        console.log("[ERROR] " + e);
-
-                        resultCtx.code = LoginResultType.Exception;
-                        resultCtx.error = e;
-                    }
-
-                    if (!activityResultHandled && !isNullOrUndefined(GoogleLogin.Config.onActivityResult)) {
-                        console.log("Handling onActivityResult() defined in config...");
-
-                        GoogleLogin.Config.onActivityResult(requestCode, resultCode, intent);
-                    }
-
-                    console.log("Calling Callback function with Results");
-                    callback && callback(resultCtx);
-                    Application.android.off(AndroidApplication.activityResultEvent, onLoginResult);
-                }
-            };
-
-            Application.android.on(AndroidApplication.activityResultEvent, onLoginResult);
-        }
-
-        return result;
-    }
-
-    static login(callback: (result: Partial<ILoginResult>) => void) {
         try {
-            this._loginCallback = callback;
-
-            const uiAction = new actionRunnable();
-            uiAction.action = () => {
-                try {
-                    const signInIntent = GoogleLogin._googleClient.getSignInIntent();
-
-                    GoogleLogin.Config.activity.startActivityForResult(signInIntent, GoogleLogin._rcGoogleSignIn);
-                } catch (e) {
-                    console.log("[ERROR] runOnUiThread(): " + e);
-                }
-            };
-
-            console.log("Starting activity for result...");
-            GoogleLogin.Config.activity.runOnUiThread(uiAction);
-        } catch (e) {
-            console.log("[ERROR] " + e);
-            throw e;
-        }
-    }
-
-    static logout(callback: () => void) {
-        console.log("Starting Logout", LOGTAG_LOGOUT);
-        try {
-            GoogleLogin._googleClient.signOut();
-            callback();
-            console.log("[SUCCESS] logging out: ", LOGTAG_LOGOUT);
-        } catch (e) {
-            console.log("[ERROR] Logging out: " + e, LOGTAG_LOGOUT);
-            callback();
-        }
-    }
-
-    private static initGoogle(result: IInitializationResult): IInitializationResult {
-        try {
-            // Strange?!
-            result.isInitialized = true;
-            // let optionBuilder = new com.google.android.gms.auth.api.signin.GoogleSignInOptions.Builder(
-            //     com.google.android.gms.auth.api.signin.GoogleSignInOptions.DEFAULT_SIGN_IN
-            // )
-            //     .requestEmail()
-            //     .requestProfile();
-
-            let gso = new com.google.android.gms.auth.api.signin.GoogleSignInOptions.Builder(com.google.android.gms.auth.api.signin.GoogleSignInOptions.DEFAULT_SIGN_IN)
-                .requestEmail();
-
-
-            if (!isNullOrUndefined(GoogleLogin.Config.google.serverClientId)) {
-                if (!GoogleLogin.Config.google.isRequestAuthCode) {
-                    console.log("Will request ID token");
-                    gso = gso.requestIdToken(
-                        GoogleLogin.Config.google.serverClientId
-                    );
-                } else {
-                    console.log("Will request server auth code");
-                    gso = gso.requestServerAuthCode(
-                        GoogleLogin.Config.google.serverClientId
-                    );
-                }
+          if (requestCode === this.rcGoogleSignIn) {
+            // @ts-ignore
+            if (resultCode === android.app.Activity.RESULT_OK) {
+              const signInResult = this.gms.auth.api.Auth.GoogleSignInApi.getSignInResultFromIntent(intent);
+              if (signInResult.isSuccess()) {
+                const account = signInResult.getSignInAccount();
+                subscriber.next({
+                  authCode: account.getServerAuthCode(),
+                });
+              } else {
+                subscriber.error(new Error('NO SUCCESS'));
+              }
+              // @ts-ignore
+            } else if (resultCode === android.app.Activity.RESULT_CANCELED) {
+              subscriber.error(new Error('CANCELLED'));
             }
-
-            gso = gso.build();
-
-            GoogleLogin._googleClient = com.google.android.gms.auth.api.signin.GoogleSignIn.getClient(GoogleLogin.Config.activity, gso);
+          }
         } catch (e) {
-            console.log("[ERROR] init.google: " + e);
-
-            result.error = e;
+          subscriber.error(new Error('ERROR'));
         }
-        return result;
+
+        subscriber.complete();
+      }
     }
+
+  private getGoogleSignInOptions(): any {
+    let gso = new this.gms.auth.api.signin.GoogleSignInOptions
+      .Builder(this.gms.auth.api.signin.GoogleSignInOptions.DEFAULT_SIGN_IN)
+      .requestEmail();
+    gso = gso.requestScopes(new this.gms.common.api.Scope(this.gms.common.Scopes.FITNESS_ACTIVITY_READ), []);
+    gso = gso.requestServerAuthCode(
+      this.config.serverClientId,
+    );
+    gso = gso.build();
+    return gso;
+  }
+
+  silentLogin(): Observable<GoogleLoginResult> {
+    return new Observable<GoogleLoginResult>((subscriber) => {
+      try {
+        this.initGoogleApiClient();
+
+        const onResult = (signInResult) => {
+          if (signInResult.isSuccess()) {
+            const account = signInResult.getSignInAccount();
+            subscriber.next({
+              authCode: account.getServerAuthCode(),
+            });
+          } else {
+            subscriber.error(new Error('NO SUCCESS'));
+          }
+          subscriber.complete();
+        };
+
+        const resultCallback = new this.gms.common.api.ResultCallback({
+          onResult,
+        });
+
+        const pendingTask = this.gms.auth.api.Auth.GoogleSignInApi.silentSignIn(this.mGoogleApiClient);
+        if (pendingTask.isDone()) {
+          onResult(pendingTask.get());
+        } else {
+          pendingTask.setResultCallback(resultCallback);
+        }
+
+      } catch (error) {
+        subscriber.error(error);
+        subscriber.complete();
+      }
+    });
+  }
+
+  login(): Observable<GoogleLoginResult> {
+    return new Observable((subscriber) => {
+      try {
+        this.initGoogleClient();
+        this.handleResult = true; // to avoid calling the call back 2 times
+
+        Application.android.on(AndroidApplication.activityResultEvent, this.onLoginResult(subscriber));
+        Application.android.off(AndroidApplication.activityResultEvent, this.onLoginResult(subscriber));
+
+        const uiAction = new actionRunnable();
+        uiAction.action = () => {
+          try {
+            const signInIntent = this.googleClient.getSignInIntent();
+            this.activity.startActivityForResult(signInIntent, this.rcGoogleSignIn);
+          } catch (e) {
+            throw new Error('[ERROR] runOnUiThread(): ' + e);
+          }
+        };
+        console.log('Starting activity for result...');
+        this.activity.runOnUiThread(uiAction);
+      } catch (error) {
+        subscriber.error(error);
+        subscriber.complete();
+      }
+    });
+  }
+
+  logout(): Observable<boolean> {
+    return new Observable<boolean>((subscriber) => {
+      try {
+        this.googleClient.signOut();
+        this.handleResult = true;
+        subscriber.next(true);
+        subscriber.complete();
+      } catch (error) {
+        subscriber.error(error);
+        subscriber.complete();
+      }
+    });
+  }
+
+  private initGoogleClient(): void {
+    try {
+      if (!this.googleClient) {
+        this.googleClient =
+          this.gms.auth.api.signin.GoogleSignIn.getClient(this.activity, this.getGoogleSignInOptions());
+      }
+    } catch (error) {
+      throw new Error('ERROR INIT GOOGLE CLIENT' + error);
+    }
+  }
+
+  private initGoogleApiClient(): void {
+    try {
+      if (!this.mGoogleApiClient) {
+        const connectionFailedListener = new this.gms.common.api.GoogleApiClient.OnConnectionFailedListener({}); // TODO implement callbacks
+        this.mGoogleApiClient = new this.gms.common.api.GoogleApiClient.Builder(this.activity)
+          .enableAutoManage(this.activity, connectionFailedListener)
+          .addApi(this.gms.auth.api.Auth.GOOGLE_SIGN_IN_API, this.getGoogleSignInOptions())
+          .build();
+      }
+    } catch (error) {
+      throw new Error('ERROR INIT GOOGLE API CLIENT' + error);
+    }
+  }
+
 }
